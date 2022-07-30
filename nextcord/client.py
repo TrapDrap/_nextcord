@@ -93,10 +93,13 @@ from .widget import Widget
 if TYPE_CHECKING:
     from .abc import GuildChannel, PrivateChannel, Snowflake, SnowflakeTime
     from .application_command import BaseApplicationCommand, ClientCog
+    from .asset import Asset
     from .channel import DMChannel
     from .enums import Locale
+    from .file import File
+    from .flags import MemberCacheFlags
     from .member import Member
-    from .message import Message
+    from .message import Attachment, Message
     from .permissions import Permissions
     from .scheduled_events import ScheduledEvent
     from .types.interactions import ApplicationCommand as ApplicationCommandPayload
@@ -174,7 +177,7 @@ class Client:
         Integer starting at ``0`` and less than :attr:`.shard_count`.
     shard_count: Optional[:class:`int`]
         The total number of shards.
-    application_id: :class:`int`
+    application_id: Optional[:class:`int`]
         The client's application ID.
     intents: :class:`Intents`
         The intents that you want to enable for the session. This is a way of
@@ -271,6 +274,23 @@ class Client:
     def __init__(
         self,
         *,
+        max_messages: Optional[int] = 1000,
+        connector: Optional[aiohttp.BaseConnector] = None,
+        proxy: Optional[str] = None,
+        proxy_auth: Optional[aiohttp.BasicAuth] = None,
+        shard_id: Optional[int] = None,
+        shard_count: Optional[int] = None,
+        application_id: Optional[int] = None,
+        intents: Intents = Intents.default(),
+        member_cache_flags: MemberCacheFlags = MISSING,
+        chunk_guilds_at_startup: bool = MISSING,
+        status: Optional[Status] = None,
+        activity: Optional[BaseActivity] = None,
+        allowed_mentions: Optional[AllowedMentions] = None,
+        heartbeat_timeout: float = 60.0,
+        guild_ready_timeout: float = 2.0,
+        assume_unsync_clock: bool = True,
+        enable_debug_events: bool = False,
         loop: Optional[asyncio.AbstractEventLoop] = None,
         lazy_load_commands: bool = True,
         rollout_associate_known: bool = True,
@@ -278,29 +298,42 @@ class Client:
         rollout_register_new: bool = True,
         rollout_update_known: bool = True,
         rollout_all_guilds: bool = False,
-        **options: Any,
     ):
         # self.ws is set in the connect method
         self.ws: DiscordWebSocket = None  # type: ignore
         self.loop: asyncio.AbstractEventLoop = asyncio.get_event_loop() if loop is None else loop
         self._listeners: Dict[str, List[Tuple[asyncio.Future, Callable[..., bool]]]] = {}
-        self.shard_id: Optional[int] = options.get("shard_id")
-        self.shard_count: Optional[int] = options.get("shard_count")
 
-        connector: Optional[aiohttp.BaseConnector] = options.pop("connector", None)
-        proxy: Optional[str] = options.pop("proxy", None)
-        proxy_auth: Optional[aiohttp.BasicAuth] = options.pop("proxy_auth", None)
-        unsync_clock: bool = options.pop("assume_unsync_clock", True)
+        self.shard_id: Optional[int] = shard_id
+        self.shard_count: Optional[int] = shard_count
+
         self.http: HTTPClient = HTTPClient(
-            connector, proxy=proxy, proxy_auth=proxy_auth, unsync_clock=unsync_clock, loop=self.loop
+            connector,
+            proxy=proxy,
+            proxy_auth=proxy_auth,
+            unsync_clock=assume_unsync_clock,
+            loop=self.loop,
         )
 
         self._handlers: Dict[str, Callable] = {"ready": self._handle_ready}
 
         self._hooks: Dict[str, Callable] = {"before_identify": self._call_before_identify_hook}
 
-        self._enable_debug_events: bool = options.pop("enable_debug_events", False)
-        self._connection: ConnectionState = self._get_state(**options)
+        self._enable_debug_events: bool = enable_debug_events
+
+        self._connection: ConnectionState = self._get_state(
+            max_messages=max_messages,
+            application_id=application_id,
+            heartbeat_timeout=heartbeat_timeout,
+            guild_ready_timeout=guild_ready_timeout,
+            allowed_mentions=allowed_mentions,
+            activity=activity,
+            status=status,
+            intents=intents,
+            chunk_guilds_at_startup=chunk_guilds_at_startup,
+            member_cache_flags=member_cache_flags,
+        )
+
         self._connection.shard_count = self.shard_count
         self._closed: bool = False
         self._ready: asyncio.Event = asyncio.Event()
@@ -326,14 +359,35 @@ class Client:
     ) -> DiscordWebSocket:
         return self.ws
 
-    def _get_state(self, **options: Any) -> ConnectionState:
+    def _get_state(
+        self,
+        max_messages: Optional[int],
+        application_id: Optional[int],
+        heartbeat_timeout: float,
+        guild_ready_timeout: float,
+        allowed_mentions: Optional[AllowedMentions],
+        activity: Optional[BaseActivity],
+        status: Optional[Status],
+        intents: Intents,
+        chunk_guilds_at_startup: bool,
+        member_cache_flags: MemberCacheFlags,
+    ) -> ConnectionState:
         return ConnectionState(
             dispatch=self.dispatch,
             handlers=self._handlers,
             hooks=self._hooks,
             http=self.http,
             loop=self.loop,
-            **options,
+            max_messages=max_messages,
+            application_id=application_id,
+            heartbeat_timeout=heartbeat_timeout,
+            guild_ready_timeout=guild_ready_timeout,
+            allowed_mentions=allowed_mentions,
+            activity=activity,
+            status=status,
+            intents=intents,
+            chunk_guilds_at_startup=chunk_guilds_at_startup,
+            member_cache_flags=member_cache_flags,
         )
 
     def _handle_ready(self) -> None:
@@ -1407,7 +1461,7 @@ class Client:
         *,
         name: str,
         region: Union[VoiceRegion, str] = VoiceRegion.us_west,
-        icon: bytes = MISSING,
+        icon: Optional[Union[bytes, Asset, Attachment, File]] = None,
         code: str = MISSING,
     ) -> Guild:
         """|coro|
@@ -1416,6 +1470,9 @@ class Client:
 
         Bot accounts in more than 10 guilds are not allowed to create guilds.
 
+        .. versionchanged:: 2.1
+            The ``icon`` parameter now accepts :class:`File`, :class:`Attachment`, and :class:`Asset`.
+
         Parameters
         ----------
         name: :class:`str`
@@ -1423,9 +1480,9 @@ class Client:
         region: :class:`.VoiceRegion`
             The region for the voice communication server.
             Defaults to :attr:`.VoiceRegion.us_west`.
-        icon: Optional[:class:`bytes`]
-            The :term:`py:bytes-like object` representing the icon. See :meth:`.ClientUser.edit`
-            for more details on what is expected.
+        icon: Optional[Union[:class:`bytes`, :class:`Asset`, :class:`Attachment`, :class:`File`]]
+            The :term:`py:bytes-like object`, :class:`File`, :class:`Attachment`, or :class:`Asset`
+            representing the icon. See :meth:`.ClientUser.edit` for more details on what is expected.
         code: :class:`str`
             The code for a template to create the guild with.
 
@@ -1444,17 +1501,12 @@ class Client:
             The guild created. This is not the same guild that is
             added to cache.
         """
-        if icon is not MISSING:
-            icon_base64 = utils._bytes_to_base64_data(icon)
-        else:
-            icon_base64 = None
-
-        region_value = str(region)
+        icon_base64 = await utils._obj_to_base64_data(icon)
 
         if code:
-            data = await self.http.create_from_template(code, name, region_value, icon_base64)
+            data = await self.http.create_from_template(code, name, str(region), icon_base64)
         else:
-            data = await self.http.create_guild(name, region_value, icon_base64)
+            data = await self.http.create_guild(name, str(region), icon_base64)
         return Guild(data=data, state=self._connection)
 
     async def fetch_stage_instance(self, channel_id: int, /) -> StageInstance:

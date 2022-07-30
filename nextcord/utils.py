@@ -43,6 +43,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     AsyncIterator,
+    Awaitable,
     Callable,
     Dict,
     ForwardRef,
@@ -63,6 +64,7 @@ from typing import (
 )
 
 from .errors import InvalidArgument
+from .file import File
 
 try:
     import orjson
@@ -125,7 +127,9 @@ if TYPE_CHECKING:
     from typing_extensions import ParamSpec
 
     from .abc import Snowflake
+    from .asset import Asset
     from .invite import Invite
+    from .message import Attachment
     from .permissions import Permissions
     from .template import Template
 
@@ -496,6 +500,19 @@ def _bytes_to_base64_data(data: bytes) -> str:
     return fmt.format(mime=mime, data=b64)
 
 
+async def _obj_to_base64_data(
+    obj: Optional[Union[bytes, Attachment, Asset, File]]
+) -> Optional[str]:
+    if obj is None:
+        return obj
+    if isinstance(obj, bytes):
+        return _bytes_to_base64_data(obj)
+    elif isinstance(obj, File):
+        return _bytes_to_base64_data(obj.fp.read())
+    else:
+        return _bytes_to_base64_data(await obj.read())
+
+
 if HAS_ORJSON:
 
     def _to_json(obj: Any) -> str:
@@ -522,12 +539,16 @@ def _parse_ratelimit_header(request: Any, *, use_clock: bool = False) -> float:
         return float(reset_after)
 
 
-async def maybe_coroutine(f, *args, **kwargs):
+async def maybe_coroutine(
+    f: Callable[P, Union[T, Awaitable[T]]], *args: P.args, **kwargs: P.kwargs
+) -> T:
     value = f(*args, **kwargs)
     if _isawaitable(value):
         return await value
     else:
-        return value
+        return value  # type: ignore
+        # type ignored as `_isawaitable` provides `TypeGuard[Awaitable[Any]]`
+        # yet we need a more specific type guard
 
 
 async def async_all(gen, *, check=_isawaitable):
